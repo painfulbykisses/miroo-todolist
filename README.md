@@ -2,6 +2,14 @@
 
 A beautiful, glassmorphic to-do list app built with React and Firebase. Miroo helps you organize tasks into projects with a stunning iOS-inspired interface featuring animated backgrounds, dark/light theme support, and real-time cloud sync.
 
+<p align="center">
+  <img src="preview.png" alt="Miroo App Preview" width="300" />
+</p>
+
+<p align="center">
+  <a href="https://miroo-todolist.vercel.app/"><strong>🌐 Live Demo</strong></a>
+</p>
+
 ## 🚀 Features
 
 - **Project-based task management** — Organize tasks into separate projects with custom theme colors
