@@ -23,15 +23,41 @@ import { getFirestore, collection, doc, setDoc, deleteDoc, updateDoc, onSnapshot
 // === FIREBASE INITIALIZATION ===
 // Memuat konfigurasi dari environment platform secara aman
 let app, auth, db, appId;
+let isLocalMode = true; // Default to local mode
 try {
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-    app = initializeApp(firebaseConfig);
-    auth = getAuth(app);
-    db = getFirestore(app);
-    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+        const firebaseConfig = JSON.parse(__firebase_config);
+        if (firebaseConfig.apiKey) {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            isLocalMode = false;
+        }
+    }
 } catch (error) {
-    console.error("Gagal menginisialisasi Firebase. Pastikan environment mendukung variabel konfigurasi.", error);
+    console.error("Firebase not available, running in local mode.", error);
 }
+
+// === LOCAL STORAGE HELPERS ===
+const LS_KEYS = {
+    profile: 'miroo_profile',
+    projects: 'miroo_projects',
+    theme: 'miroo_theme',
+};
+
+const loadLocal = (key) => {
+    try {
+        const data = localStorage.getItem(key);
+        return data ? JSON.parse(data) : null;
+    } catch { return null; }
+};
+
+const saveLocal = (key, data) => {
+    try {
+        localStorage.setItem(key, JSON.stringify(data));
+    } catch (e) { console.error('localStorage save error:', e); }
+};
 
 // Blob colors palette for randomly generated new projects
 const blobColors = [
@@ -73,6 +99,21 @@ export default function App() {
 
     // === FIREBASE AUTHENTICATION EFFECT ===
     useEffect(() => {
+        if (isLocalMode) {
+            // Local mode: set a fake user and load profile from localStorage
+            setFbUser({ uid: 'local-user' });
+            const savedProfile = loadLocal(LS_KEYS.profile);
+            if (savedProfile) {
+                setCurrentUser(savedProfile);
+                if (savedProfile.theme !== undefined) setIsDarkMode(savedProfile.theme);
+            }
+            const savedProjects = loadLocal(LS_KEYS.projects) || [];
+            setProjects(savedProjects);
+            if (savedProjects.length > 0) setSelectedFormProject(savedProjects[0]);
+            setIsAuthLoading(false);
+            return;
+        }
+
         if (!auth) {
             setIsAuthLoading(false);
             return;
@@ -104,7 +145,7 @@ export default function App() {
     // === FIREBASE DATA FETCHING EFFECTS ===
     // 1. Fetch User Profile & Theme Preferences
     useEffect(() => {
-        if (!fbUser || !db) return;
+        if (isLocalMode || !fbUser || !db) return;
 
         const profileRef = doc(db, 'artifacts', appId, 'users', fbUser.uid, 'profile', 'data');
         const unsubscribe = onSnapshot(profileRef,
@@ -129,7 +170,7 @@ export default function App() {
 
     // 2. Fetch Projects Collection
     useEffect(() => {
-        if (!fbUser || !currentUser || !db) return;
+        if (isLocalMode || !fbUser || !currentUser || !db) return;
 
         const projectsRef = collection(db, 'artifacts', appId, 'users', fbUser.uid, 'projects');
         const unsubscribe = onSnapshot(projectsRef,
@@ -159,6 +200,11 @@ export default function App() {
 
     const updateTheme = async (isDark) => {
         setIsDarkMode(isDark);
+        if (isLocalMode) {
+            const profile = loadLocal(LS_KEYS.profile);
+            if (profile) saveLocal(LS_KEYS.profile, { ...profile, theme: isDark });
+            return;
+        }
         if (fbUser && currentUser && db) {
             const profileRef = doc(db, 'artifacts', appId, 'users', fbUser.uid, 'profile', 'data');
             await updateDoc(profileRef, { theme: isDark }).catch(console.error);
@@ -168,7 +214,23 @@ export default function App() {
     // === PROFILE ACTIONS ===
     const handleLogin = async (e) => {
         e.preventDefault();
-        if (!loginName.trim() || !fbUser || !db) return;
+        if (!loginName.trim()) return;
+
+        if (isLocalMode) {
+            const profile = {
+                name: loginName.trim(),
+                avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?ixlib=rb-4.0.3&auto=format&fit=crop&w=150&q=80',
+                theme: true,
+                createdAt: Date.now()
+            };
+            saveLocal(LS_KEYS.profile, profile);
+            setCurrentUser(profile);
+            setIsDarkMode(true);
+            setLoginName('');
+            return;
+        }
+
+        if (!fbUser || !db) return;
 
         setIsAuthLoading(true);
         try {
@@ -187,8 +249,15 @@ export default function App() {
     };
 
     const handleLogout = async () => {
-        if (!fbUser || !db) return;
-        if (window.confirm("Are you sure you want to reset your local profile? Your data will remain in the cloud.")) {
+        if (window.confirm("Are you sure you want to reset your profile?")) {
+            if (isLocalMode) {
+                localStorage.removeItem(LS_KEYS.profile);
+                localStorage.removeItem(LS_KEYS.projects);
+                setCurrentUser(null);
+                setProjects([]);
+                return;
+            }
+            if (!fbUser || !db) return;
             const profileRef = doc(db, 'artifacts', appId, 'users', fbUser.uid, 'profile', 'data');
             await deleteDoc(profileRef);
         }
@@ -196,14 +265,21 @@ export default function App() {
 
     const handleAvatarChange = async (e) => {
         const file = e.target.files[0];
-        if (file && fbUser && db) {
-            const reader = new FileReader();
-            reader.onloadend = async () => {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+            if (isLocalMode) {
+                const profile = { ...currentUser, avatarUrl: reader.result };
+                saveLocal(LS_KEYS.profile, profile);
+                setCurrentUser(profile);
+                return;
+            }
+            if (fbUser && db) {
                 const profileRef = doc(db, 'artifacts', appId, 'users', fbUser.uid, 'profile', 'data');
                 await updateDoc(profileRef, { avatarUrl: reader.result }).catch(console.error);
-            };
-            reader.readAsDataURL(file);
-        }
+            }
+        };
+        reader.readAsDataURL(file);
     };
 
     const triggerAvatarUpload = () => {
@@ -223,10 +299,11 @@ export default function App() {
 
     // === DATA ACTIONS (FIRESTORE) ===
     const handleAddProject = async () => {
-        if (!newProjectTitle.trim() || !fbUser || !db) return;
+        if (!newProjectTitle.trim()) return;
 
         const newProjectId = crypto.randomUUID();
         const newProject = {
+            id: newProjectId,
             title: newProjectTitle.trim(),
             tasks: [],
             blobColor: newProjectColor,
@@ -238,6 +315,15 @@ export default function App() {
         setNewProjectColor(blobColors[0]);
         setIsAddingProject(false);
 
+        if (isLocalMode) {
+            const updated = [newProject, ...projects];
+            setProjects(updated);
+            saveLocal(LS_KEYS.projects, updated);
+            if (!selectedFormProject) setSelectedFormProject(newProject);
+            return;
+        }
+
+        if (!fbUser || !db) return;
         try {
             await setDoc(doc(db, 'artifacts', appId, 'users', fbUser.uid, 'projects', newProjectId), newProject);
         } catch (error) {
@@ -247,9 +333,15 @@ export default function App() {
 
     const deleteProject = async (id) => {
         closeProject();
-        if (!fbUser || !db) return;
 
         setTimeout(async () => {
+            if (isLocalMode) {
+                const updated = projects.filter(p => p.id !== id);
+                setProjects(updated);
+                saveLocal(LS_KEYS.projects, updated);
+                return;
+            }
+            if (!fbUser || !db) return;
             try {
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', fbUser.uid, 'projects', id));
             } catch (error) {
@@ -259,7 +351,7 @@ export default function App() {
     };
 
     const handleAddTask = async () => {
-        if (!newTaskText.trim() || !selectedFormProject || !fbUser || !db) return;
+        if (!newTaskText.trim() || !selectedFormProject) return;
 
         const newTask = {
             id: crypto.randomUUID(),
@@ -278,6 +370,16 @@ export default function App() {
         setNewTaskDesc('');
         setIsAddingTask(false);
 
+        if (isLocalMode) {
+            const updated = projects.map(p =>
+                p.id === targetProject.id ? { ...p, tasks: updatedTasks } : p
+            );
+            setProjects(updated);
+            saveLocal(LS_KEYS.projects, updated);
+            return;
+        }
+
+        if (!fbUser || !db) return;
         try {
             await updateDoc(doc(db, 'artifacts', appId, 'users', fbUser.uid, 'projects', targetProject.id), {
                 tasks: updatedTasks
@@ -288,8 +390,6 @@ export default function App() {
     };
 
     const toggleTask = async (projectId, taskId) => {
-        if (!fbUser || !db) return;
-
         const targetProject = projects.find(p => p.id === projectId);
         if (!targetProject) return;
 
@@ -297,6 +397,16 @@ export default function App() {
             t.id === taskId ? { ...t, completed: !t.completed } : t
         );
 
+        if (isLocalMode) {
+            const updated = projects.map(p =>
+                p.id === projectId ? { ...p, tasks: updatedTasks } : p
+            );
+            setProjects(updated);
+            saveLocal(LS_KEYS.projects, updated);
+            return;
+        }
+
+        if (!fbUser || !db) return;
         try {
             await updateDoc(doc(db, 'artifacts', appId, 'users', fbUser.uid, 'projects', projectId), {
                 tasks: updatedTasks
@@ -307,13 +417,21 @@ export default function App() {
     };
 
     const deleteTask = async (projectId, taskId) => {
-        if (!fbUser || !db) return;
-
         const targetProject = projects.find(p => p.id === projectId);
         if (!targetProject) return;
 
         const updatedTasks = targetProject.tasks.filter(t => t.id !== taskId);
 
+        if (isLocalMode) {
+            const updated = projects.map(p =>
+                p.id === projectId ? { ...p, tasks: updatedTasks } : p
+            );
+            setProjects(updated);
+            saveLocal(LS_KEYS.projects, updated);
+            return;
+        }
+
+        if (!fbUser || !db) return;
         try {
             await updateDoc(doc(db, 'artifacts', appId, 'users', fbUser.uid, 'projects', projectId), {
                 tasks: updatedTasks
@@ -371,10 +489,10 @@ export default function App() {
                             type="submit"
                             disabled={!loginName.trim()}
                             className={`w-full py-4 rounded-3xl font-semibold text-[17px] tracking-wide transition-all backdrop-blur-md border ${loginName.trim()
-                                    ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
-                                        'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
-                                    : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
-                                        'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
+                                ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
+                                    'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
+                                : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
+                                    'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
                                 }`}
                         >
                             Start using Miroo
@@ -712,8 +830,8 @@ export default function App() {
                                             key={p.id}
                                             onClick={() => setSelectedFormProject(p)}
                                             className={`flex-shrink-0 px-5 py-2.5 rounded-full text-[15px] font-medium whitespace-nowrap transition-all duration-300 border ${isSelected
-                                                    ? t('bg-white/20 border-white text-white shadow-[0_0_15px_rgba(255,255,255,0.2)] backdrop-blur-md', 'bg-white border-white text-slate-900 shadow-sm backdrop-blur-md')
-                                                    : t('bg-black/20 border-white/10 text-white/70 hover:bg-white/10', 'bg-white/30 border-white/60 text-slate-600 hover:bg-white/60')
+                                                ? t('bg-white/20 border-white text-white shadow-[0_0_15px_rgba(255,255,255,0.2)] backdrop-blur-md', 'bg-white border-white text-slate-900 shadow-sm backdrop-blur-md')
+                                                : t('bg-black/20 border-white/10 text-white/70 hover:bg-white/10', 'bg-white/30 border-white/60 text-slate-600 hover:bg-white/60')
                                                 }`}
                                         >
                                             {p.title}
@@ -756,10 +874,10 @@ export default function App() {
                             onClick={handleAddTask}
                             disabled={!newTaskText.trim()}
                             className={`w-full py-4 rounded-full font-semibold text-[17px] tracking-wide transition-all backdrop-blur-md border ${newTaskText.trim()
-                                    ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
-                                        'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
-                                    : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
-                                        'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
+                                ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
+                                    'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
+                                : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
+                                    'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
                                 }`}
                         >
                             Create Task
@@ -827,8 +945,8 @@ export default function App() {
                                         key={colorClass}
                                         onClick={() => setNewProjectColor(colorClass)}
                                         className={`flex-shrink-0 w-12 h-12 rounded-full ${colorClass} flex items-center justify-center transition-all duration-300 ${newProjectColor === colorClass
-                                                ? 'scale-110 shadow-lg'
-                                                : 'opacity-50 hover:opacity-100 hover:scale-105'
+                                            ? 'scale-110 shadow-lg'
+                                            : 'opacity-50 hover:opacity-100 hover:scale-105'
                                             }`}
                                     >
                                         {newProjectColor === colorClass && <Check className="w-6 h-6 text-white drop-shadow-md" />}
@@ -843,10 +961,10 @@ export default function App() {
                             onClick={handleAddProject}
                             disabled={!newProjectTitle.trim()}
                             className={`w-full py-4 rounded-full font-semibold text-[17px] tracking-wide transition-all backdrop-blur-md border ${newProjectTitle.trim()
-                                    ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
-                                        'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
-                                    : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
-                                        'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
+                                ? t('bg-white text-black border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-[0_0_20px_rgba(255,255,255,0.3)]',
+                                    'bg-slate-900 text-white border-transparent hover:scale-[1.02] active:scale-[0.98] shadow-lg')
+                                : t('bg-white/5 text-white/30 border-white/10 cursor-not-allowed shadow-none',
+                                    'bg-white/40 text-slate-400 border-white/40 cursor-not-allowed shadow-none')
                                 }`}
                         >
                             Create Project
